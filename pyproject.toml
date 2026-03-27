@@ -1,0 +1,20 @@
+[project]
+name = "nlp-stylometry"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "MrSpokeMan", email = "filip.mirski@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic-settings>=2.13.1",
+    "requests>=2.33.0",
+]
+
+[project.scripts]
+nlp-stylometry = "nlp_stylometry:main"
+
+[build-system]
+requires = ["uv_build>=0.9.29,<0.10.0"]
+build-backend = "uv_build"
