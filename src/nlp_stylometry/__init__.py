@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from npl-stylometry!")
+from nlp_stylometry.main import main
+
+__all__ = ["main"]
