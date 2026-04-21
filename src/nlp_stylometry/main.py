@@ -24,7 +24,7 @@ def main():
     corpora = build_corpus(settings.data_dir)
 
     dataset = [
-        {"author": corpus.author, "text": chunk}
+        {"author": corpus.author, "kind": corpus.kind, "genre": corpus.genre, "title": corpus.title, "text": chunk}
         for corpus in corpora
         for chunk in corpus.chunks
     ]
