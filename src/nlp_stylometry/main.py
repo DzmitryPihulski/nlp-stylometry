@@ -1,9 +1,9 @@
 import json
 import logging
 
-from nlp_stylometry.api.fetch_data import PrepareData
-from nlp_stylometry.config import get_settings
-from nlp_stylometry.preprocess import build_corpus
+from api.fetch_data import PrepareData
+from config import get_settings
+from preprocess import build_corpus
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,21 @@ def main():
     corpora = build_corpus(settings.data_dir)
 
     dataset = [
-        {"author": corpus.author, "kind": corpus.kind, "genre": corpus.genre, "title": corpus.title, "text": chunk}
+        {
+            "author": corpus.author,
+            "kind": corpus.kind,
+            "genre": corpus.genre,
+            "title": corpus.title,
+            "text": chunk,
+        }
         for corpus in corpora
         for chunk in corpus.chunks
     ]
 
     out_path = settings.data_dir / "dataset.json"
-    out_path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     logger.info(
         "Saved %d samples (%d authors) to %s",
         len(dataset),

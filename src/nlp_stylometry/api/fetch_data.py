@@ -3,9 +3,8 @@ import logging
 from typing import Any
 
 import requests
-
-from nlp_stylometry.config import get_settings
-from nlp_stylometry.preprocessing import clean_text
+from config import get_settings
+from preprocessing import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +126,22 @@ class PrepareData:
                     content = content_response.text
 
                 records.append(
-                    {"author": author, "kind": kind, "genre": genre, "title": title, "content": content}
+                    {
+                        "author": author,
+                        "kind": kind,
+                        "genre": genre,
+                        "title": title,
+                        "content": content,
+                    }
                 )
                 fetched += 1
                 logger.info(
                     "Fetched %s text for %r from %s (kind=%r, genre=%r)",
-                    format, author, file_url, kind, genre,
+                    format,
+                    author,
+                    file_url,
+                    kind,
+                    genre,
                 )
 
                 if not all:
@@ -154,12 +163,7 @@ class PrepareData:
             kind = _sanitize_dirname(record["kind"])
             genre = _sanitize_dirname(record["genre"])
 
-            path = (
-                settings.data_dir
-                / author.replace(" ", "_")
-                / kind
-                / genre
-            )
+            path = settings.data_dir / author.replace(" ", "_") / kind / genre
             path.mkdir(parents=True, exist_ok=True)
 
             key = (author, kind, genre)
