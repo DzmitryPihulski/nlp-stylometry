@@ -1,31 +1,41 @@
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
-
-# ============================================================
-# B. REPREZENTACJA 2: HerBERT embeddings
-# ============================================================
 import torch
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from scipy.stats import mannwhitneyu
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoModel, AutoTokenizer
+
+# ============================================================
+# HERBERT
+# ============================================================
 
 MODEL_NAME = "allegro/herbert-base-cased"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
 herbert = AutoModel.from_pretrained(MODEL_NAME)
-herbert.eval()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
 herbert = herbert.to(device)
+herbert.eval()
+
 print(f"HerBERT działa na: {device}")
 
+# ============================================================
+# HERBERT EMBEDDINGS
+# ============================================================
 
-def get_herbert_embeddings(texts, batch_size=16):
-    """Mean-pooling ostatniej warstwy ukrytej HerBERTa."""
+
+def get_herbert_embeddings(
+    texts,
+    batch_size=16,
+):
+    """
+    Mean pooling embeddingów HerBERT.
+    """
+
     all_embs = []
 
     for i in range(0, len(texts), batch_size):
@@ -42,50 +52,137 @@ def get_herbert_embeddings(texts, batch_size=16):
         with torch.no_grad():
             out = herbert(**encoded)
 
-        # mean pooling z uwzględnieniem attention mask
-        mask = encoded["attention_mask"].unsqueeze(-1).float()
         token_emb = out.last_hidden_state
+
+        mask = encoded["attention_mask"].unsqueeze(-1).float()
+
         emb = (token_emb * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
 
         all_embs.append(emb.cpu().numpy())
 
         if i % 160 == 0:
-            print(f"  HerBERT: {i}/{len(texts)} fragmentów...")
+            print(f"  HerBERT: {i}/{len(texts)}")
 
     return np.vstack(all_embs)
 
 
-def pairwise_similarities(vectors, labels, is_sparse=False):
+# ============================================================
+# DOC2VEC
+# ============================================================
+
+
+def get_doc2vec_embeddings(
+    texts,
+    vector_size=300,
+    window=10,
+    min_count=2,
+    epochs=40,
+    workers=4,
+):
     """
-    Zwraca (within, between) – tablice cosine similarity
-    dla par: ten-sam-autor i różni-autorzy.
-    Używa numpy/sklearn – bez pętli po parach.
+    Generuje embeddingi Doc2Vec.
     """
-    labels = np.array(labels)
-    n = len(labels)
+
+    tagged_docs = [
+        TaggedDocument(words=text.split(), tags=[str(i)])
+        for i, text in enumerate(texts)
+    ]
+
+    model = Doc2Vec(
+        documents=tagged_docs,
+        vector_size=vector_size,
+        window=window,
+        min_count=min_count,
+        workers=workers,
+        epochs=epochs,
+        dm=1,
+        seed=42,
+    )
+
+    vectors = np.array([model.dv[str(i)] for i in range(len(tagged_docs))])
+
+    return vectors
+
+
+# ============================================================
+# SIMILARITIES
+# ============================================================
+
+
+def compute_similarity_matrix(
+    vectors,
+    is_sparse=False,
+):
+    """
+    Oblicza macierz cosine similarity.
+    """
 
     if is_sparse:
-        sim_matrix = cosine_similarity(vectors)  # dense (n x n)
+        sim_matrix = cosine_similarity(vectors)
+
     else:
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1e-9, norms)
-        vn = vectors / norms
-        sim_matrix = vn @ vn.T  # dense (n x n)
 
-    rows, cols = np.triu_indices(n, k=1)  # górny trójkąt
+        norms = np.where(norms == 0, 1e-9, norms)
+
+        vn = vectors / norms
+
+        sim_matrix = vn @ vn.T
+
+    return sim_matrix
+
+
+def pairwise_similarities(
+    vectors,
+    labels,
+    is_sparse=False,
+):
+    """
+    Zwraca:
+    - within-author similarities
+    - between-author similarities
+    """
+
+    labels = np.array(labels)
+
+    sim_matrix = compute_similarity_matrix(vectors, is_sparse)
+
+    n = len(labels)
+
+    rows, cols = np.triu_indices(n, k=1)
+
     sims = sim_matrix[rows, cols]
+
     same = labels[rows] == labels[cols]
 
     return sims[same], sims[~same]
 
 
-def run_stats(within, between, name):
-    """Mann-Whitney U: H0 – within == between."""
-    u, p = mannwhitneyu(within, between, alternative="two-sided")
+# ============================================================
+# STATISTICS
+# ============================================================
 
-    # rank-biserial correlation (effect size)
-    n1, n2 = len(within), len(between)
-    r_rb = 1 - (2 * u) / (n1 * n2)
+
+def run_stats(
+    within,
+    between,
+    name,
+):
+    """
+    Mann-Whitney U:
+    H0: within == between
+    """
+
+    u, p = mannwhitneyu(
+        within,
+        between,
+        alternative="two-sided",
+    )
+
+    n1 = len(within)
+    n2 = len(between)
+
+    effect_r = 1 - (2 * u) / (n1 * n2)
 
     return {
         "reprezentacja": name,
@@ -97,24 +194,33 @@ def run_stats(within, between, name):
         "n_between": n2,
         "U": u,
         "p_value": p,
-        "effect_r": r_rb,
+        "effect_r": effect_r,
     }
 
 
-def mean_pairwise_per_author_pair(vectors, labels, authors, is_sparse=False):
-    """Średnie podobieństwo dla każdej pary (A,B), A<=B."""
+# ============================================================
+# AUTHOR PAIR ANALYSIS
+# ============================================================
+
+
+def mean_pairwise_per_author_pair(
+    vectors,
+    labels,
+    authors,
+    is_sparse=False,
+):
+    """
+    Średnie similarity dla par autorów.
+    """
+
     labels = np.array(labels)
+
+    sim_matrix = compute_similarity_matrix(vectors, is_sparse)
+
     n = len(labels)
 
-    if is_sparse:
-        sim_matrix = cosine_similarity(vectors)
-    else:
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1e-9, norms)
-        vn = vectors / norms
-        sim_matrix = vn @ vn.T
-
     rows, cols = np.triu_indices(n, k=1)
+
     result = {}
 
     for a1 in authors:
@@ -122,19 +228,32 @@ def mean_pairwise_per_author_pair(vectors, labels, authors, is_sparse=False):
             mask = ((labels[rows] == a1) & (labels[cols] == a2)) | (
                 (labels[rows] == a2) & (labels[cols] == a1)
             )
+
             if mask.sum() > 0:
                 result[(a1, a2)] = sim_matrix[rows[mask], cols[mask]].mean()
+
             else:
                 result[(a1, a2)] = np.nan
 
     return result
 
 
-def pairs_to_matrix(pair_dict, authors):
+def pairs_to_matrix(
+    pair_dict,
+    authors,
+):
+    """
+    Zamienia słownik par autorów na macierz.
+    """
+
     n = len(authors)
+
     mat = np.full((n, n), np.nan)
+
     for i, a1 in enumerate(authors):
         for j, a2 in enumerate(authors):
             key = (a1, a2) if (a1, a2) in pair_dict else (a2, a1)
+
             mat[i, j] = pair_dict.get(key, np.nan)
+
     return mat

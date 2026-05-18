@@ -1,91 +1,159 @@
+# evaluation.py
+
 import warnings
 
 import numpy as np
 import pandas as pd
-from scipy.stats import mannwhitneyu, ttest_ind
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-)
+from imblearn.metrics import geometric_mean_score
+from scipy.stats import ttest_rel, wilcoxon
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.svm import LinearSVC
 
 warnings.filterwarnings("ignore")
 
+# ============================================================
+# KONFIGURACJA
+# ============================================================
 
 RANDOM_STATE = 42
 N_SPLITS = 5
-AUTHORS = ["Adam_Mickiewicz", "Juliusz_Słowacki", "Zygmunt_Krasiński"]
+
+AUTHORS = [
+    "Adam_Mickiewicz",
+    "Juliusz_Słowacki",
+    "Zygmunt_Krasiński",
+]
+
 KINDS = ["Dramat", "Epika"]
+
+# ============================================================
+# PIPELINE
+# ============================================================
 
 
 def make_pipeline(vectorizer) -> Pipeline:
     return Pipeline(
         [
             ("tfidf", vectorizer),
-            ("svm", LinearSVC(max_iter=5000, random_state=RANDOM_STATE)),
+            (
+                "svm",
+                LinearSVC(
+                    max_iter=5000,
+                    random_state=RANDOM_STATE,
+                ),
+            ),
         ]
     )
 
 
+# ============================================================
+# WARIANT 1 — BEZ KONTROLI GATUNKU
+# ============================================================
+
+
 def evaluate_no_genre_control(
-    df: pd.DataFrame, vectorizer
-) -> tuple[np.ndarray, np.ndarray]:
+    df: pd.DataFrame,
+    vectorizer,
+) -> dict:
     """
-    Wariant 1: BEZ kontroli gatunku.
-    GroupKFold po tytule zapewnia brak wycieku danych między tytułami.
-    Zwraca tablice F1 i Accuracy dla każdego foldu.
+    Klasyfikacja autora bez kontroli gatunku.
+
+    - wszystkie gatunki razem
+    - GroupKFold po title
+    - brak wycieku między fragmentami tego samego utworu
     """
+
     X = df["text"].values
     y = df["author"].values
     groups = df["title"].values
 
     gkf = GroupKFold(n_splits=N_SPLITS)
-    f1s, accs = [], []
 
-    for train_idx, test_idx in gkf.split(X, y, groups):
+    f1s = []
+    accs = []
+    gmeans = []
+
+    for fold, (train_idx, test_idx) in enumerate(
+        gkf.split(X, y, groups),
+        start=1,
+    ):
         clf = make_pipeline(vectorizer)
-        clf.fit(X[train_idx], y[train_idx])
-        pred = clf.predict(X[test_idx])
-        f1s.append(f1_score(y[test_idx], pred, average="macro", zero_division=0))
-        accs.append(accuracy_score(y[test_idx], pred))
 
-    return np.array(f1s), np.array(accs)
+        clf.fit(X[train_idx], y[train_idx])
+
+        pred = clf.predict(X[test_idx])
+
+        f1 = f1_score(
+            y[test_idx],
+            pred,
+            average="macro",
+            zero_division=0,
+        )
+
+        acc = accuracy_score(
+            y[test_idx],
+            pred,
+        )
+
+        gmean = geometric_mean_score(
+            y[test_idx],
+            pred,
+            average="macro",
+        )
+
+        f1s.append(f1)
+        accs.append(acc)
+        gmeans.append(gmean)
+
+    return {
+        "f1": np.array(f1s),
+        "acc": np.array(accs),
+        "gmean": np.array(gmeans),
+    }
+
+
+# ============================================================
+# WARIANT 2 — Z KONTROLĄ GATUNKU
+# ============================================================
 
 
 def evaluate_with_genre_control(
-    df: pd.DataFrame, vectorizer
-) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    df: pd.DataFrame,
+    vectorizer,
+) -> dict:
     """
-    Wariant 2: Z KONTROLĄ GATUNKU.
-    Dla każdego gatunku osobny pipeline: trenowanie i testowanie w obrębie
-    tego samego gatunku. Gatunki z < 2 autorami są pomijane.
+    Kontrola gatunku:
+    - osobny model dla każdego gatunku
+    - train/test WYŁĄCZNIE w obrębie danego gatunku
+    - GroupKFold po title
+    """
 
-    Zwraca:
-      - tablice F1 i Accuracy (zagregowane po wszystkich gatunkach i foldach)
-      - listę szczegółowych wyników per gatunek
-    """
-    f1s, accs = [], []
+    global_f1 = []
+    global_acc = []
+    global_gmean = []
+
     per_genre = []
 
     for genre in sorted(df["kind"].unique()):
-        sub = df[df["kind"] == genre]
+        sub = df[df["kind"] == genre].copy()
 
-        # Wymóg: co najmniej 2 autorów w gatunku
+        # minimum 2 autorów
         if sub["author"].nunique() < 2:
-            print(
-                f"  [SKIP] Gatunek '{genre}': tylko {sub['author'].nunique()} autor(zy) — pomijam."
-            )
+            print(f"[SKIP] {genre}: tylko {sub['author'].nunique()} autor.")
             continue
 
-        # Wymóg: co najmniej N_SPLITS tytułów (grup)
+        # liczba grup = liczba tytułów
         n_titles = sub["title"].nunique()
-        n_splits_actual = min(N_SPLITS, n_titles)
+
+        n_splits_actual = min(
+            N_SPLITS,
+            n_titles,
+        )
+
         if n_splits_actual < 2:
-            print(
-                f"  [SKIP] Gatunek '{genre}': za mało tytułów ({n_titles}) — pomijam."
-            )
+            print(f"[SKIP] {genre}: za mało tytułów.")
             continue
 
         X = sub["text"].values
@@ -93,68 +161,259 @@ def evaluate_with_genre_control(
         groups = sub["title"].values
 
         gkf = GroupKFold(n_splits=n_splits_actual)
-        genre_f1s, genre_accs = [], []
 
-        for train_idx, test_idx in gkf.split(X, y, groups):
+        genre_f1 = []
+        genre_acc = []
+        genre_gmean = []
+
+        for fold, (train_idx, test_idx) in enumerate(
+            gkf.split(X, y, groups),
+            start=1,
+        ):
             clf = make_pipeline(vectorizer)
-            clf.fit(X[train_idx], y[train_idx])
-            pred = clf.predict(X[test_idx])
-            genre_f1s.append(
-                f1_score(y[test_idx], pred, average="macro", zero_division=0)
+
+            clf.fit(
+                X[train_idx],
+                y[train_idx],
             )
-            genre_accs.append(accuracy_score(y[test_idx], pred))
 
-        f1s.extend(genre_f1s)
-        accs.extend(genre_accs)
+            pred = clf.predict(X[test_idx])
 
+            f1 = f1_score(
+                y[test_idx],
+                pred,
+                average="macro",
+                zero_division=0,
+            )
+
+            acc = accuracy_score(
+                y[test_idx],
+                pred,
+            )
+
+            gmean = geometric_mean_score(
+                y[test_idx],
+                pred,
+                average="macro",
+            )
+
+            genre_f1.append(f1)
+            genre_acc.append(acc)
+            genre_gmean.append(gmean)
+
+        # agregacja globalna
+        global_f1.extend(genre_f1)
+        global_acc.extend(genre_acc)
+        global_gmean.extend(genre_gmean)
+
+        # raport per gatunek
         per_genre.append(
             {
                 "genre": genre,
-                "f1_mean": np.mean(genre_f1s),
-                "f1_std": np.std(genre_f1s),
-                "acc_mean": np.mean(genre_accs),
-                "acc_std": np.std(genre_accs),
-                "n_folds": n_splits_actual,
+                "authors": sorted(sub["author"].unique()),
                 "n_chunks": len(sub),
-                "authors": list(sub["author"].unique()),
+                "n_titles": n_titles,
+                "n_folds": n_splits_actual,
+                "f1_mean": np.mean(genre_f1),
+                "f1_std": np.std(genre_f1),
+                "acc_mean": np.mean(genre_acc),
+                "acc_std": np.std(genre_acc),
+                "gmean_mean": np.mean(genre_gmean),
+                "gmean_std": np.std(genre_gmean),
             }
         )
 
-    return np.array(f1s), np.array(accs), per_genre
+    return {
+        "f1": np.array(global_f1),
+        "acc": np.array(global_acc),
+        "gmean": np.array(global_gmean),
+        "per_genre": per_genre,
+    }
 
 
 # ============================================================
-# 6. TESTY STATYSTYCZNE
+# TESTY STATYSTYCZNE
 # ============================================================
 
 
-def statistical_tests(f1_no: np.ndarray, f1_gen: np.ndarray) -> dict:
+def statistical_tests(
+    no_control_scores: np.ndarray,
+    genre_control_scores: np.ndarray,
+) -> dict:
     """
-    Testy dla prób NIEZALEŻNYCH:
-      - Welch t-test (nierówne wariancje, nierówne liczebności)
-      - Mann-Whitney U (nieparametryczny odpowiednik)
+    Porównanie wariantów:
+    - test sparowany
+    - porównujemy średnie foldów
 
-    UWAGA: Próby są niezależne, ponieważ f1_no i f1_gen mają różne długości
-    (5 foldów vs 5 × liczba_gatunków), co wyklucza testy sparowane.
+    Ponieważ liczba obserwacji może być różna:
+    - redukujemy do wspólnego minimum
     """
-    t_stat, t_p = ttest_ind(f1_no, f1_gen, equal_var=False)
 
+    n = min(
+        len(no_control_scores),
+        len(genre_control_scores),
+    )
+
+    x = no_control_scores[:n]
+    y = genre_control_scores[:n]
+
+    # t-test sparowany
+    t_stat, t_p = ttest_rel(
+        x,
+        y,
+    )
+
+    # Wilcoxon
     try:
-        u_stat, u_p = mannwhitneyu(f1_no, f1_gen, alternative="two-sided")
+        w_stat, w_p = wilcoxon(
+            x,
+            y,
+        )
     except ValueError:
-        u_stat, u_p = np.nan, np.nan
+        w_stat, w_p = np.nan, np.nan
 
     return {
-        "n_no": len(f1_no),
-        "n_gen": len(f1_gen),
-        "f1_no_mean": np.mean(f1_no),
-        "f1_no_std": np.std(f1_no),
-        "f1_gen_mean": np.mean(f1_gen),
-        "f1_gen_std": np.std(f1_gen),
-        "delta": np.mean(f1_gen) - np.mean(f1_no),
-        "welch_t": t_stat,
-        "welch_p": t_p,
-        "mwu_u": u_stat,
-        "mwu_p": u_p,
-        "significant": t_p < 0.05 and u_p < 0.05,
+        "n": n,
+        "mean_no": np.mean(x),
+        "std_no": np.std(x),
+        "mean_gen": np.mean(y),
+        "std_gen": np.std(y),
+        "delta": np.mean(y) - np.mean(x),
+        "ttest_t": t_stat,
+        "ttest_p": t_p,
+        "wilcoxon_w": w_stat,
+        "wilcoxon_p": w_p,
+        "significant": (t_p < 0.05 and w_p < 0.05),
     }
+
+
+# ============================================================
+# PEŁNE URUCHOMIENIE
+# ============================================================
+
+
+def run_experiment(
+    df_chunks: pd.DataFrame,
+    vectorizer,
+    vectorizer_name: str,
+) -> dict:
+
+    print("\n" + "=" * 60)
+    print(f"Wektoryzacja: {vectorizer_name}")
+    print("=" * 60)
+
+    # ----------------------------------------
+    # wariant bez kontroli
+    # ----------------------------------------
+
+    no_control = evaluate_no_genre_control(
+        df_chunks,
+        vectorizer,
+    )
+
+    # ----------------------------------------
+    # wariant z kontrolą
+    # ----------------------------------------
+
+    genre_control = evaluate_with_genre_control(
+        df_chunks,
+        vectorizer,
+    )
+
+    # ----------------------------------------
+    # statystyka
+    # ----------------------------------------
+
+    stats_f1 = statistical_tests(
+        no_control["f1"],
+        genre_control["f1"],
+    )
+
+    stats_gmean = statistical_tests(
+        no_control["gmean"],
+        genre_control["gmean"],
+    )
+
+    return {
+        "vectorizer": vectorizer_name,
+        # bez kontroli
+        "f1_no": no_control["f1"],
+        "acc_no": no_control["acc"],
+        "gmean_no": no_control["gmean"],
+        # z kontrolą
+        "f1_gen": genre_control["f1"],
+        "acc_gen": genre_control["acc"],
+        "gmean_gen": genre_control["gmean"],
+        # szczegóły
+        "per_genre": genre_control["per_genre"],
+        # testy
+        "stats_f1": stats_f1,
+        "stats_gmean": stats_gmean,
+    }
+
+
+# ============================================================
+# RAPORT
+# ============================================================
+
+
+def print_report(result: dict):
+
+    print("\n" + "=" * 60)
+    print("WYNIKI")
+    print("=" * 60)
+
+    print(f"\nWektoryzacja: {result['vectorizer']}")
+
+    # ========================================================
+    # F1
+    # ========================================================
+
+    s = result["stats_f1"]
+
+    print("\n[F1-score macro]")
+
+    print(f"Bez kontroli gatunku: {s['mean_no']:.4f} ± {s['std_no']:.4f}")
+
+    print(f"Z kontrolą gatunku: {s['mean_gen']:.4f} ± {s['std_gen']:.4f}")
+
+    print(f"Delta: {s['delta']:+.4f}")
+
+    print(f"Paired t-test: t={s['ttest_t']:.4f}, p={s['ttest_p']:.4f}")
+
+    print(f"Wilcoxon: W={s['wilcoxon_w']:.4f}, p={s['wilcoxon_p']:.4f}")
+
+    # ========================================================
+    # G-MEAN
+    # ========================================================
+
+    s = result["stats_gmean"]
+
+    print("\n[Geometric Mean]")
+
+    print(f"Bez kontroli gatunku: {s['mean_no']:.4f} ± {s['std_no']:.4f}")
+
+    print(f"Z kontrolą gatunku: {s['mean_gen']:.4f} ± {s['std_gen']:.4f}")
+
+    print(f"Delta: {s['delta']:+.4f}")
+
+    print(f"Paired t-test: t={s['ttest_t']:.4f}, p={s['ttest_p']:.4f}")
+
+    print(f"Wilcoxon: W={s['wilcoxon_w']:.4f}, p={s['wilcoxon_p']:.4f}")
+
+    # ========================================================
+    # PER GATUNEK
+    # ========================================================
+
+    print("\nWyniki per gatunek:")
+
+    for g in result["per_genre"]:
+        print(f"\n{g['genre']}")
+
+        print(f"  Autorzy: {', '.join(g['authors'])}")
+
+        print(f"  Chunks: {g['n_chunks']}")
+
+        print(f"  F1: {g['f1_mean']:.4f} ± {g['f1_std']:.4f}")
+
+        print(f"  G-Mean: {g['gmean_mean']:.4f} ± {g['gmean_std']:.4f}")
